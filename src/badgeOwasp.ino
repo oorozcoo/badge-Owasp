@@ -1,3 +1,4 @@
+#include <EEPROM.h>
 #include <SPI.h>
 #include <Wire.h>
 #include <Adafruit_GFX.h>
@@ -13,6 +14,8 @@
   #include <avr/power.h>
 #endif
 
+#define EEPROM_MEM 34
+
 //NeoPixel
 #define PIN 15      //Puerto IO15
 #define NUMPIXELS 2 //Numero de pixeles
@@ -25,7 +28,7 @@ Adafruit_NeoPixel pixels(NUMPIXELS, PIN, NEO_GRB + NEO_KHZ800);
 #define SCREEN_ADDRESS 0x3C
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
-String nombre = "";
+// String nombre = "";
 String cmd;
 int flag = -1;        // Solicitud de datos: -1(No se ha introducido ningun comando
                       //                     1(Se escribio el comando change, owasp twitter o facebook
@@ -37,16 +40,21 @@ String twitter = "";  // Guarda el twitter del asistente
 String facebook = ""; // Guarda el Facebook del asistente
 String msg ="";
 String txt;
-String redesS[] = {"","",""};
+String redesS[] = {"","",""}; //Inicialización del arreglo de redes sociales
 
+// Temporizador por hardware
 hw_timer_t *timer = NULL;
+// Asegurar la variable que se este compartiendo entre el
+// loop principal y el ISR (Interrupt Service Routine)
 portMUX_TYPE timerMux = portMUX_INITIALIZER_UNLOCKED;
 int ind = 0;
 
+// Función a llamar cuando ocurra una interrupción de tiempo.
+// ISR
 void IRAM_ATTR redesSociales(void);
 
 void setup() {
-  // put your setup code here, to run once:
+  char a, t, f; // a = Asistente, t = Twitter y f = Facebook
   // Inicializamos pixeles
   pixels.begin();
   pixels.clear();
@@ -56,21 +64,42 @@ void setup() {
   cmd.reserve(10);
   twitter.reserve(10);
   facebook.reserve(10);
-  nombre.reserve(20);
   msg.reserve(10);
 
   // Inicializando pantalla OLED
   if(!display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS)){
     Serial.println(F("Se requieere pantalla OLED"));
   }else {
-   timer = timerBegin(0, 80, true);
-   timerAttachInterrupt(timer, &redesSociales, true);
-
+    // Se inicia el temporizador
+    timer = timerBegin(0, 80, true);
+    // Se asigna la función ISR a llamar cuando se genere
+    // una interrupción por el timer
+    timerAttachInterrupt(timer, &redesSociales, true);
+    
+    // Cada 3seg. aproximadamente se escribe en el
+    // timer.
     timerAlarmWrite(timer, 3000000, true);
     timerAlarmEnable(timer);
-    //pantallaOLED("", 2);
-    //delay(1000);
+
   }
+
+  if(!EEPROM.begin(EEPROM_MEM)){
+    txt="Error!!";
+  }else {
+    a = byte(EEPROM.read(0));
+    t = byte(EEPROM.read(10));
+    f = byte(EEPROM.read(20));
+    if ((isAscii(a) && a != ' ') || (isAscii(t) && t != ' ') || (isAscii(f) && f != ' ')) { //Valida si hay datos en la memoria
+      leerDatos();
+      Serial.println("Se obtuvieron los datos satisfactorialmente");
+    }else {
+      Serial.println("No hay datos almacenados.\nReiniciando la memoria");
+      inicializarMemoria();
+      Serial.println("Memoria limpia");
+    }
+  }
+  
+  // Carga la imagen de inicio.
   owasp();
 
 }
@@ -81,10 +110,13 @@ void loop() {
 
   if(Serial.available() > 0) {
     c = (char)Serial.read();
-    if(c != 8){
+    // Si no se ha presionado la tecla backspace, se sigue concateneando
+    // los caracteres.
+    if(c != 8 ){
       cmd += c; 
     }
 
+    // Compatibilidad entre sistemas de comunicación serial
     if(c == '\n' || c == '\r'){
       cmd.trim();
       if(cmd.equals("change") && flag == 1){
@@ -118,6 +150,10 @@ void loop() {
         switch (flag) {
           case 2:
             msg = String(cmd);
+            
+            // Guarda el nombre en el nombre del asistente en la dirección 0x00
+            salvarDatos(msg, 0);
+            
             redesS[0] = String("Asistente:\n"+msg);
             flag = 1;
             cmd ="";
@@ -125,6 +161,10 @@ void loop() {
 
           case 3:
             twitter = String(cmd);
+
+            //Guarda twitter en la dirección 0x0A
+            salvarDatos(twitter, 10);
+            
             redesS[1] = String("Twitter:\n"+twitter);
             flag = 1;
             cmd = "";
@@ -132,6 +172,10 @@ void loop() {
 
           case 4:
             facebook = String(cmd);
+
+            //Guarda facebook en la dirección 0x14
+            salvarDatos(facebook, 20);
+            
             redesS[2] = String("Facebook:\n"+facebook);
             flag = 1;
             cmd = "";
@@ -226,6 +270,74 @@ void parpadeaPixel(boolean adv){
   }
 }
 
-void modificarFecha(int hora, int minuto, int dia, int mes, int anio){
+void salvarDatos(String datos, int direccion){
+  char tmp;
+  int indx = direccion;
   
+  for(int i = 0; i < datos.length(); i++){
+    tmp = datos[i];
+    EEPROM.write((indx + i), (int)tmp);
+    delay(10);
+  }
+  
+  indx += datos.length();
+  tmp = '\n';
+  EEPROM.write(indx, (int)tmp);
+  EEPROM.commit();
+  
+  Serial.println("Datos guardados");
+}
+
+void leerDatos(){
+  char c = ' ';
+  int pos, direccion;
+  String tmp;
+
+  pos = direccion = 0;
+  for(int i = 0; i < EEPROM_MEM; i++){
+    c = byte(EEPROM.read(i));
+    if(c != '\n' && c != ' '){
+      tmp += c;
+    }else {
+      switch(pos){
+        // Asistente
+        case 0:
+          tmp.trim();
+          if (tmp.length() > 0){
+            redesS[pos] = String("Asistente:\n"+tmp);  
+          }
+        break;
+
+        //Twitter
+        case 1:
+          tmp.trim();
+          if(tmp.length() > 0){
+            redesS[pos] = String("Twitter:\n"+tmp); 
+          }
+        break;
+
+        //Facebook
+        case 2:
+          tmp.trim();
+          if(tmp.length() > 0) {
+            redesS[pos] = String("Facebook:\n"+tmp); 
+          }
+        break;
+      }
+      tmp = "";
+      pos++;
+      direccion += 10;
+      i = direccion-1;
+    }
+  }
+}
+
+void inicializarMemoria(){
+  char c = ' ';
+  
+  for(int i = 0; i < EEPROM_MEM; i++){
+    EEPROM.write(i,(int)c);
+    delay(10); 
+  }
+  EEPROM.commit(); 
 }
